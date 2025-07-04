@@ -36,7 +36,10 @@ const registerUser = async (req, res) => {
 
 const loginUser = (req, res) => {
   const { email, password } = req.body;
-  const sql = 'SELECT id, name, email, password FROM users WHERE email = ? AND deleted_at IS NULL';
+  const sql = `SELECT u.id, u.email, u.password, c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone
+               FROM users u
+               LEFT JOIN customer c ON u.id = c.user_id
+               WHERE u.email = ?`;
   connection.execute(sql, [email], async (err, results) => {
     if (err) {
       console.log(err);
@@ -55,11 +58,12 @@ const loginUser = (req, res) => {
 
     // Remove password from response
     delete user.password;
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET,);
+    const token = jwt.sign({ id: user.id}, process.env.JWT_SECRET);
+    
 
     return res.status(200).json({
       success: "welcome back",
-      user: results[0],
+      user,
       token
     });
   });
@@ -72,8 +76,9 @@ const updateUser = (req, res) => {
   //   "password": "password"
   // }
   console.log(req.body, req.file)
-  const { title, fname, lname, addressline, town, zipcode, phone, userId, } = req.body;
+  const { title, last_name, first_name, address, city, zipcode, phone, userId, } = req.body;
 
+  let image = null;
   if (req.file) {
     image = req.file.path.replace(/\\/g, "/");
   }
@@ -82,18 +87,18 @@ const updateUser = (req, res) => {
   // ON DUPLICATE KEY UPDATE email = 'john@example.com';
   const userSql = `
   INSERT INTO customer 
-    (title, fname, lname, addressline, town, zipcode, phone, image_path, user_id)
+    (title, last_name, first_name, address, city, zipcode, phone, image_path, user_id)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON DUPLICATE KEY UPDATE 
     title = VALUES(title),
-    fname = VALUES(fname),
-    lname = VALUES(lname),
-    addressline = VALUES(addressline),
-    town = VALUES(town),
+    last_name = VALUES(last_name),
+    first_name = VALUES(first_name),
+    address = VALUES(address),
+    city = VALUES(city),
     zipcode = VALUES(zipcode),
     phone = VALUES(phone),
     image_path = VALUES(image_path)`;
-  const params = [title, fname, lname, addressline, town, zipcode, phone, image, userId];
+  const params = [title, last_name, first_name, address, city, zipcode, phone, image, userId];
 
   try {
     connection.execute(userSql, params, (err, result) => {
@@ -143,4 +148,37 @@ const deactivateUser = (req, res) => {
   });
 };
 
-module.exports = { registerUser, loginUser, updateUser, deactivateUser };
+// Get customer info by email (for autofill, no password required)
+const getCustomerByEmail = (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+
+const sql = `SELECT u.id, u.email, c.customer_id, c.last_name, c.first_name, c.title, c.address, c.city, c.zipcode, c.phone,
+             FROM users u
+             LEFT JOIN customer c ON u.id = c.user_id
+             WHERE u.email = ?`;
+  connection.execute(sql, [email], (err, results) => {
+    if (err) return res.status(500).json({ error: 'Error fetching customer', details: err });
+    if (!results.length) return res.status(404).json({ error: 'No customer found' });
+    res.status(200).json({ success: true, customer: results[0] });
+  });
+};
+
+const getCustomerByUserId = (req, res) => {
+  const userId = req.query.user_id || req.params.user_id;
+  if (!userId) return res.status(400).json({ error: 'user_id is required' });
+
+  const sql = `
+    SELECT u.id, u.email, c.customer_id, c.title, c.last_name, c.first_name, c.address, c.city, c.zipcode, c.phone
+    FROM users u
+    LEFT JOIN customer c ON u.id = c.user_id
+    WHERE u.id = ?
+  `;
+  connection.execute(sql, [userId], (err, results) => {
+    if (err) return res.status(500).json({ error: 'Error fetching customer', details: err });
+    if (!results.length) return res.status(404).json({ error: 'No customer found' });
+    res.status(200).json({ success: true, customer: results[0] });
+  });
+};
+
+module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByEmail, getCustomerByUserId };

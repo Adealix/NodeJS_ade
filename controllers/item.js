@@ -1,16 +1,18 @@
 const connection = require('../config/database');
 
-// Get all items with their stock quantity
+// Get all items with their image (if any)
 exports.getAllItems = (req, res) => {
-    const sql = `SELECT i.item_id, i.name, i.description, i.category, i.cost_price, i.sell_price, i.show_item, s.quantity
+    const sql = `SELECT i.item_id, i.name, i.description, i.category, i.cost_price, i.sell_price, i.show_item, s.quantity, img.image_path
                  FROM items i
-                 LEFT JOIN stock s ON i.item_id = s.item_id`;
+                 LEFT JOIN stock s ON i.item_id = s.item_id
+                 LEFT JOIN items_images img ON i.item_id = img.item_id`;
     try {
         connection.query(sql, (err, rows) => {
             if (err) {
                 console.log(err);
                 return res.status(500).json({ error: 'Error fetching items', details: err });
             }
+            // If no image, image_path will be null due to LEFT JOIN
             return res.status(200).json({ success: true, items: rows });
         });
     } catch (error) {
