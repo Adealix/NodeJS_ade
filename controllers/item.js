@@ -2,11 +2,17 @@ const connection = require('../config/database');
 
 // Get all items with their image (if any)
 exports.getAllItems = (req, res) => {
-    const sql = `SELECT i.item_id, i.name, i.description, i.category, i.cost_price, i.sell_price, i.show_item, s.quantity, img.image_path
+    // If admin and ?all=true, show all items; else only show_item = 'yes'
+    let sql = `SELECT i.item_id, i.name, i.description, i.category, i.cost_price, i.sell_price, i.show_item, s.quantity, img.image_path
                  FROM items i
                  LEFT JOIN stock s ON i.item_id = s.item_id
-                 LEFT JOIN items_images img ON i.item_id = img.item_id
-                 WHERE i.show_item = 'yes'`;
+                 LEFT JOIN items_images img ON i.item_id = img.item_id`;
+    // Only show all if admin and all=true
+    const isAdmin = req.user && req.user.role === 'admin';
+    const showAll = req.query.all === 'true';
+    if (!(isAdmin && showAll)) {
+        sql += ` WHERE i.show_item = 'yes'`;
+    }
     try {
         connection.query(sql, (err, rows) => {
             if (err) {
@@ -81,6 +87,10 @@ exports.createItem = (req, res) => {
         // If sent as a single string in form-data
         image_paths = [image_paths];
     }
+    // If no images, set default
+    if (!Array.isArray(image_paths) || image_paths.length === 0 || !image_paths[0]) {
+        image_paths = ['storage/images/logo1.png'];
+    }
     const { name, description, category, cost_price, sell_price, show_item = 'yes', quantity } = req.body;
     if (!name || !description || !category) {
         return res.status(400).json({ error: 'Missing required fields: name, description, category' });
@@ -105,18 +115,14 @@ exports.createItem = (req, res) => {
                 console.log(err2);
                 return res.status(500).json({ error: 'Error creating stock', details: err2 });
             }
-            // Insert images if provided
-            if (Array.isArray(image_paths) && image_paths.length > 0 && image_paths[0]) {
-                const imageSql = `INSERT INTO items_images (item_id, image_path) VALUES (?, ?)`;
-                image_paths.forEach((imgPath) => {
-                    connection.execute(imageSql, [itemId, imgPath], (err3) => {
-                        if (err3) console.log(err3);
-                    });
+            // Insert images (guaranteed to have at least one)
+            const imageSql = `INSERT INTO items_images (item_id, image_path) VALUES (?, ?)`;
+            image_paths.forEach((imgPath) => {
+                connection.execute(imageSql, [itemId, imgPath], (err3) => {
+                    if (err3) console.log(err3);
                 });
-                return res.status(201).json({ success: true, item_id: itemId, message: 'Item and images created successfully' });
-            } else {
-                return res.status(201).json({ success: true, item_id: itemId, message: 'Item created successfully' });
-            }
+            });
+            return res.status(201).json({ success: true, item_id: itemId, message: 'Item and images created successfully' });
         });
     });
 };

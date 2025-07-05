@@ -6,11 +6,14 @@ const { getAllItems,
     createItem,
     updateItem,
     deleteItem, } = require('../controllers/item')
-// const {isAuthenticatedUser} = require('../middlewares/auth')
-router.get('/items',  getAllItems)
-router.get('/items/:id', getSingleItem)
-router.post('/items', upload.array('images', 10), createItem)
-// router.put('/items/:id', updateItem)
-router.post('/items/:id', upload.array('images', 10), updateItem)
-router.delete('/items/:id', deleteItem)
+
+const { isAuthenticatedUser, isAdmin } = require('../middlewares/auth')
+
+router.get('/items', isAuthenticatedUser, getAllItems);
+router.get('/items/:id', isAuthenticatedUser, getSingleItem);
+router.post('/items', isAuthenticatedUser, isAdmin, upload.array('images', 10), createItem);
+router.put('/items/:id', isAuthenticatedUser, isAdmin, upload.array('images', 10), updateItem);
+router.post('/items/:id', isAuthenticatedUser, isAdmin, upload.array('images', 10), updateItem); // for method-override (PUT as POST)
+router.delete('/items/:id', isAuthenticatedUser, isAdmin, deleteItem);
+
 module.exports = router;
