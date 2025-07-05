@@ -5,15 +5,36 @@ exports.getAllItems = (req, res) => {
     const sql = `SELECT i.item_id, i.name, i.description, i.category, i.cost_price, i.sell_price, i.show_item, s.quantity, img.image_path
                  FROM items i
                  LEFT JOIN stock s ON i.item_id = s.item_id
-                 LEFT JOIN items_images img ON i.item_id = img.item_id`;
+                 LEFT JOIN items_images img ON i.item_id = img.item_id
+                 WHERE i.show_item = 'yes'`;
     try {
         connection.query(sql, (err, rows) => {
             if (err) {
                 console.log(err);
                 return res.status(500).json({ error: 'Error fetching items', details: err });
             }
-            // If no image, image_path will be null due to LEFT JOIN
-            return res.status(200).json({ success: true, items: rows });
+            // Group images by item_id, but keep all other fields as in the original code
+            const itemsMap = {};
+            rows.forEach(row => {
+                if (!itemsMap[row.item_id]) {
+                    itemsMap[row.item_id] = {
+                        item_id: row.item_id,
+                        name: row.name,
+                        description: row.description,
+                        category: row.category,
+                        cost_price: row.cost_price,
+                        sell_price: row.sell_price,
+                        show_item: row.show_item,
+                        quantity: row.quantity,
+                        images: []
+                    };
+                }
+                if (row.image_path) {
+                    itemsMap[row.item_id].images.push(row.image_path);
+                }
+            });
+            const items = Object.values(itemsMap);
+            return res.status(200).json({ success: true, items });
         });
     } catch (error) {
         console.log(error);
@@ -47,12 +68,31 @@ exports.getSingleItem = (req, res) => {
 
 // Create a new item and its stock
 exports.createItem = (req, res) => {
+    // Accept both JSON and multipart form data
+    let image_paths = req.body.image_paths;
+    // If files are uploaded, use their paths
+    if (req.files && req.files.length > 0) {
+        image_paths = req.files.map(file => {
+            // Only keep the filename, then prepend /storage/images/
+            const filename = file.filename;
+            return `storage/images/${filename}`;
+        });
+    } else if (typeof image_paths === 'string') {
+        // If sent as a single string in form-data
+        image_paths = [image_paths];
+    }
     const { name, description, category, cost_price, sell_price, show_item = 'yes', quantity } = req.body;
     if (!name || !description || !category) {
         return res.status(400).json({ error: 'Missing required fields: name, description, category' });
     }
-    const itemSql = `INSERT INTO items (name, description, category, cost_price, sell_price, show_item) VALUES (?, ?, ?, ?, ?, ?)`;
-    const itemValues = [name, description, category, cost_price || null, sell_price || null, show_item];
+    const itemSql = `INSERT INTO items (name, description, category, cost_price, sell_price) VALUES (?, ?, ?, ?, ?)`;
+    const itemValues = [
+      name,
+      description,
+      category,
+      cost_price || null,
+      sell_price || null
+    ];
     connection.execute(itemSql, itemValues, (err, result) => {
         if (err) {
             console.log(err);
@@ -65,7 +105,18 @@ exports.createItem = (req, res) => {
                 console.log(err2);
                 return res.status(500).json({ error: 'Error creating stock', details: err2 });
             }
-            return res.status(201).json({ success: true, item_id: itemId, message: 'Item created successfully' });
+            // Insert images if provided
+            if (Array.isArray(image_paths) && image_paths.length > 0 && image_paths[0]) {
+                const imageSql = `INSERT INTO items_images (item_id, image_path) VALUES (?, ?)`;
+                image_paths.forEach((imgPath) => {
+                    connection.execute(imageSql, [itemId, imgPath], (err3) => {
+                        if (err3) console.log(err3);
+                    });
+                });
+                return res.status(201).json({ success: true, item_id: itemId, message: 'Item and images created successfully' });
+            } else {
+                return res.status(201).json({ success: true, item_id: itemId, message: 'Item created successfully' });
+            }
         });
     });
 };
@@ -73,9 +124,24 @@ exports.createItem = (req, res) => {
 // Update an item and its stock
 exports.updateItem = (req, res) => {
     const id = req.params.id;
-    const { name, description, category, cost_price, sell_price, show_item, quantity } = req.body;
+    // Debug: log the received body
+    console.log('updateItem req.body:', req.body);
+    let image_paths = (req.body && req.body.image_paths) ? req.body.image_paths : undefined;
+    if (req.files && req.files.length > 0) {
+        image_paths = req.files.map(file => {
+            const filename = file.filename;
+            return `storage/images/${filename}`;
+        });
+    } else if (typeof image_paths === 'string') {
+        image_paths = [image_paths];
+    } else if (!image_paths) {
+        image_paths = [];
+    }
+    const { name, description, category, cost_price, sell_price, show_item, quantity } = req.body || {};
+    // More robust required field check
     if (!name || !description || !category) {
-        return res.status(400).json({ error: 'Missing required fields: name, description, category' });
+        console.log('Missing fields:', { name, description, category });
+        return res.status(400).json({ error: 'Missing required fields: name, description, category', received: req.body });
     }
     const itemSql = `UPDATE items SET name = ?, description = ?, category = ?, cost_price = ?, sell_price = ?, show_item = ? WHERE item_id = ?`;
     const itemValues = [name, description, category, cost_price || null, sell_price || null, show_item || 'yes', id];
@@ -90,28 +156,57 @@ exports.updateItem = (req, res) => {
                 console.log(err2);
                 return res.status(500).json({ error: 'Error updating stock', details: err2 });
             }
-            return res.status(200).json({ success: true, message: 'Item updated successfully' });
+            // Only replace images if new images are attached
+            if (Array.isArray(image_paths) && image_paths.length > 0 && image_paths[0]) {
+                // Delete old images
+                const deleteImagesSql = `DELETE FROM items_images WHERE item_id = ?`;
+                connection.execute(deleteImagesSql, [id], (err3) => {
+                    if (err3) {
+                        console.log(err3);
+                        return res.status(500).json({ error: 'Error deleting old images', details: err3 });
+                    }
+                    // Insert new images
+                    const imageSql = `INSERT INTO items_images (item_id, image_path) VALUES (?, ?)`;
+                    image_paths.forEach((imgPath) => {
+                        connection.execute(imageSql, [id, imgPath], (err4) => {
+                            if (err4) console.log(err4);
+                        });
+                    });
+                    return res.status(200).json({ success: true, message: 'Item and images updated successfully' });
+                });
+            } else {
+                // No new images attached, leave images untouched
+                return res.status(200).json({ success: true, message: 'Item updated successfully' });
+            }
         });
     });
 };
 
-// Delete an item and its stock
+// Delete an item and its stock and images
 exports.deleteItem = (req, res) => {
     const id = req.params.id;
-    // Delete stock first due to FK constraint
-    const stockSql = `DELETE FROM stock WHERE item_id = ?`;
-    connection.execute(stockSql, [id], (err) => {
-        if (err) {
-            console.log(err);
-            return res.status(500).json({ error: 'Error deleting stock', details: err });
+    // Delete images first
+    const deleteImagesSql = `DELETE FROM items_images WHERE item_id = ?`;
+    connection.execute(deleteImagesSql, [id], (errImg) => {
+        if (errImg) {
+            console.log(errImg);
+            return res.status(500).json({ error: 'Error deleting images', details: errImg });
         }
-        const itemSql = `DELETE FROM items WHERE item_id = ?`;
-        connection.execute(itemSql, [id], (err2) => {
-            if (err2) {
-                console.log(err2);
-                return res.status(500).json({ error: 'Error deleting item', details: err2 });
+        // Delete stock next due to FK constraint
+        const stockSql = `DELETE FROM stock WHERE item_id = ?`;
+        connection.execute(stockSql, [id], (err) => {
+            if (err) {
+                console.log(err);
+                return res.status(500).json({ error: 'Error deleting stock', details: err });
             }
-            return res.status(200).json({ success: true, message: 'Item deleted successfully' });
+            const itemSql = `DELETE FROM items WHERE item_id = ?`;
+            connection.execute(itemSql, [id], (err2) => {
+                if (err2) {
+                    console.log(err2);
+                    return res.status(500).json({ error: 'Error deleting item', details: err2 });
+                }
+                return res.status(200).json({ success: true, message: 'Item and images deleted successfully' });
+            });
         });
     });
 };

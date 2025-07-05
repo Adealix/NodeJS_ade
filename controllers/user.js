@@ -36,7 +36,8 @@ const registerUser = async (req, res) => {
 
 const loginUser = (req, res) => {
   const { email, password } = req.body;
-  const sql = `SELECT u.id, u.email, u.password, c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone
+  // Select role from users table
+  const sql = `SELECT u.id, u.email, u.password, u.role, c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone
                FROM users u
                LEFT JOIN customer c ON u.id = c.user_id
                WHERE u.email = ?`;
@@ -58,68 +59,57 @@ const loginUser = (req, res) => {
 
     // Remove password from response
     delete user.password;
-    const token = jwt.sign({ id: user.id}, process.env.JWT_SECRET);
-    
+    // Include role in JWT
+    const token = jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET);
 
-    return res.status(200).json({
-      success: "welcome back",
-      user,
-      token
+    // Save token to users table (api_token column)
+    const updateTokenSql = 'UPDATE users SET api_token = ? WHERE id = ?';
+    connection.execute(updateTokenSql, [token, user.id], (err2) => {
+      if (err2) {
+        console.log(err2);
+        return res.status(500).json({ error: 'Error saving token', details: err2 });
+      }
+      return res.status(200).json({
+        success: "welcome back",
+        user,
+        token
+      });
     });
   });
 };
 
 const updateUser = (req, res) => {
-  // {
-  //   "name": "steve",
-  //   "email": "steve@gmail.com",
-  //   "password": "password"
-  // }
-  console.log(req.body, req.file)
-  const { title, last_name, first_name, address, city, zipcode, phone, userId, } = req.body;
-
+  const { title, last_name, first_name, address, city, zipcode, phone, userId } = req.body;
   let image = null;
   if (req.file) {
     image = req.file.path.replace(/\\/g, "/");
   }
-  //     INSERT INTO users(user_id, username, email)
-  //   VALUES(1, 'john_doe', 'john@example.com')
-  // ON DUPLICATE KEY UPDATE email = 'john@example.com';
-  const userSql = `
-  INSERT INTO customer 
-    (title, last_name, first_name, address, city, zipcode, phone, image_path, user_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON DUPLICATE KEY UPDATE 
-    title = VALUES(title),
-    last_name = VALUES(last_name),
-    first_name = VALUES(first_name),
-    address = VALUES(address),
-    city = VALUES(city),
-    zipcode = VALUES(zipcode),
-    phone = VALUES(phone),
-    image_path = VALUES(image_path)`;
+
+  // Only update, do not insert
+  const updateSql = `
+    UPDATE customer SET
+      title = ?,
+      last_name = ?,
+      first_name = ?,
+      address = ?,
+      city = ?,
+      zipcode = ?,
+      phone = ?,
+      image_path = ?
+    WHERE user_id = ?
+  `;
   const params = [title, last_name, first_name, address, city, zipcode, phone, image, userId];
 
-  try {
-    connection.execute(userSql, params, (err, result) => {
-      if (err instanceof Error) {
-        console.log(err);
-
-        return res.status(401).json({
-          error: err
-        });
-      }
-
-      return res.status(200).json({
-        success: true,
-        message: 'profile updated',
-        result
-      })
+  connection.execute(updateSql, params, (err, result) => {
+    if (err) {
+      return res.status(500).json({ error: err });
+    }
+    return res.status(200).json({
+      success: true,
+      message: 'Profile updated',
+      result
     });
-  } catch (error) {
-    console.log(error)
-  }
-
+  });
 };
 
 const deactivateUser = (req, res) => {
@@ -181,4 +171,27 @@ const getCustomerByUserId = (req, res) => {
   });
 };
 
-module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByEmail, getCustomerByUserId };
+const deleteUserAndCustomer = (req, res) => {
+  const user_id = req.params.user_id;
+  if (!user_id) {
+    return res.status(400).json({ error: 'user_id is required' });
+  }
+
+  // First delete the customer, then the user
+  const deleteCustomerSql = 'DELETE FROM customer WHERE user_id = ?';
+  const deleteUserSql = 'DELETE FROM users WHERE id = ?';
+
+  connection.execute(deleteCustomerSql, [user_id], (err, customerResult) => {
+    if (err) {
+      return res.status(500).json({ error: 'Error deleting customer', details: err });
+    }
+    connection.execute(deleteUserSql, [user_id], (err2, userResult) => {
+      if (err2) {
+        return res.status(500).json({ error: 'Error deleting user', details: err2 });
+      }
+      return res.status(200).json({ success: true, message: 'User and customer deleted', user_id });
+    });
+  });
+};
+
+module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByEmail, getCustomerByUserId, deleteUserAndCustomer };
