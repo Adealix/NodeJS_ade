@@ -98,7 +98,8 @@ exports.createOrder = (req, res, next) => {
                                         order_id,
                                         dateOrdered,
                                         message: 'Order placed successfully!',
-                                        cart
+                                        cart,
+                                        shipping: 50.00 // <-- add this
                                     });
                                 }
                             });
@@ -107,6 +108,72 @@ exports.createOrder = (req, res, next) => {
                 });
             });
         });
+    });
+};
+
+exports.getUserOrdersWithItems = (req, res) => {
+    const userId = req.params.userId;
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+
+    // Get all orders for this user's customer_id, with customer info and ALL item images
+    const sql = `
+        SELECT 
+            o.order_id, o.date_ordered, o.status,
+            c.last_name, c.first_name, c.address, c.city, c.phone,
+            oi.item_id, oi.quantity, i.name, i.sell_price,
+            img.image_path
+        FROM orders o
+        INNER JOIN customer c ON o.customer_id = c.customer_id
+        INNER JOIN users u ON c.user_id = u.id
+        INNER JOIN orderline oi ON o.order_id = oi.order_id
+        INNER JOIN items i ON oi.item_id = i.item_id
+        LEFT JOIN items_images img ON i.item_id = img.item_id
+        WHERE u.id = ?
+        ORDER BY o.date_ordered DESC, o.order_id DESC, oi.item_id
+    `;
+    connection.execute(sql, [userId], (err, rows) => {
+        if (err) return res.status(500).json({ error: 'Error fetching orders', details: err });
+        if (!rows.length) return res.status(200).json({ success: true, orders: [] });
+
+        // Group by order_id, then by item_id, and aggregate images
+        const ordersMap = {};
+        rows.forEach(row => {
+            if (!ordersMap[row.order_id]) {
+                ordersMap[row.order_id] = {
+                    order_id: row.order_id,
+                    date_ordered: row.date_ordered,
+                    status: row.status,
+                    last_name: row.last_name,
+                    first_name: row.first_name,
+                    address: row.address,
+                    city: row.city,
+                    phone: row.phone,
+                    shipping: 50.00, // Add shipping fee here
+                    items: {},
+                };
+            }
+            // Group items by item_id
+            if (!ordersMap[row.order_id].items[row.item_id]) {
+                ordersMap[row.order_id].items[row.item_id] = {
+                    item_id: row.item_id,
+                    name: row.name,
+                    quantity: row.quantity,
+                    price: row.sell_price,
+                    subtotal: row.sell_price * row.quantity,
+                    images: [],
+                };
+            }
+            // Add image if exists and not already in array
+            if (row.image_path && !ordersMap[row.order_id].items[row.item_id].images.includes(row.image_path)) {
+                ordersMap[row.order_id].items[row.item_id].images.push(row.image_path);
+            }
+        });
+        // Convert items object to array for each order
+        const orders = Object.values(ordersMap).map(order => {
+            order.items = Object.values(order.items);
+            return order;
+        });
+        res.status(200).json({ success: true, orders });
     });
 };
 
