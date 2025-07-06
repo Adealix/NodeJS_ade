@@ -37,7 +37,7 @@ const registerUser = async (req, res) => {
 const loginUser = (req, res) => {
   const { email, password } = req.body;
   // Select role from users table
-  const sql = `SELECT u.id, u.email, u.password, u.role, c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone
+  const sql = `SELECT u.id, u.email, u.password, u.role, u.status, c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone
                FROM users u
                LEFT JOIN customer c ON u.id = c.user_id
                WHERE u.email = ?`;
@@ -55,6 +55,11 @@ const loginUser = (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    // Check if the account is active
+    if (user.status !== 'active') {
+      return res.status(403).json({ success: false, message: 'Account is not active. Please contact an Administrator' });
     }
 
     // Remove password from response
@@ -80,36 +85,59 @@ const loginUser = (req, res) => {
 
 const updateUser = (req, res) => {
   const { title, last_name, first_name, address, city, zipcode, phone, userId } = req.body;
-  let image = null;
+
   if (req.file) {
-    image = req.file.path.replace(/\\/g, "/");
-  }
-
-  // Only update, do not insert
-  const updateSql = `
-    UPDATE customer SET
-      title = ?,
-      last_name = ?,
-      first_name = ?,
-      address = ?,
-      city = ?,
-      zipcode = ?,
-      phone = ?,
-      image_path = ?
-    WHERE user_id = ?
-  `;
-  const params = [title, last_name, first_name, address, city, zipcode, phone, image, userId];
-
-  connection.execute(updateSql, params, (err, result) => {
-    if (err) {
-      return res.status(500).json({ error: err });
-    }
-    return res.status(200).json({
-      success: true,
-      message: 'Profile updated',
-      result
+    // If a new image is uploaded, update image_path
+    const filename = req.file.filename;
+    const image = `storage/images/${filename}`;
+    const updateSql = `
+      UPDATE customer SET
+        title = ?,
+        last_name = ?,
+        first_name = ?,
+        address = ?,
+        city = ?,
+        zipcode = ?,
+        phone = ?,
+        image_path = ?
+      WHERE user_id = ?
+    `;
+    const params = [title, last_name, first_name, address, city, zipcode, phone, image, userId];
+    connection.execute(updateSql, params, (err, result) => {
+      if (err) {
+        return res.status(500).json({ error: err });
+      }
+      return res.status(200).json({
+        success: true,
+        message: 'Profile updated',
+        result
+      });
     });
-  });
+  } else {
+    // No new image: do NOT update image_path, keep existing value in DB
+    const updateSql = `
+      UPDATE customer SET
+        title = ?,
+        last_name = ?,
+        first_name = ?,
+        address = ?,
+        city = ?,
+        zipcode = ?,
+        phone = ?
+      WHERE user_id = ?
+    `;
+    const params = [title, last_name, first_name, address, city, zipcode, phone, userId];
+    connection.execute(updateSql, params, (err, result) => {
+      if (err) {
+        return res.status(500).json({ error: err });
+      }
+      return res.status(200).json({
+        success: true,
+        message: 'Profile updated',
+        result
+      });
+    });
+  }
 };
 
 const deactivateUser = (req, res) => {
@@ -138,28 +166,28 @@ const deactivateUser = (req, res) => {
   });
 };
 
-// Get customer info by email (for autofill, no password required)
-const getCustomerByEmail = (req, res) => {
-  const { email } = req.query;
-  if (!email) return res.status(400).json({ error: 'Email is required' });
+// // Get customer info by email (for autofill, no password required)
+// const getCustomerByEmail = (req, res) => {
+//   const { email } = req.query;
+//   if (!email) return res.status(400).json({ error: 'Email is required' });
 
-const sql = `SELECT u.id, u.email, c.customer_id, c.last_name, c.first_name, c.title, c.address, c.city, c.zipcode, c.phone,
-             FROM users u
-             LEFT JOIN customer c ON u.id = c.user_id
-             WHERE u.email = ?`;
-  connection.execute(sql, [email], (err, results) => {
-    if (err) return res.status(500).json({ error: 'Error fetching customer', details: err });
-    if (!results.length) return res.status(404).json({ error: 'No customer found' });
-    res.status(200).json({ success: true, customer: results[0] });
-  });
-};
+// const sql = `SELECT u.id, u.email, c.customer_id, c.last_name, c.first_name, c.title, c.address, c.city, c.zipcode, c.phone,
+//              FROM users u
+//              LEFT JOIN customer c ON u.id = c.user_id
+//              WHERE u.email = ?`;
+//   connection.execute(sql, [email], (err, results) => {
+//     if (err) return res.status(500).json({ error: 'Error fetching customer', details: err });
+//     if (!results.length) return res.status(404).json({ error: 'No customer found' });
+//     res.status(200).json({ success: true, customer: results[0] });
+//   });
+// };
 
 const getCustomerByUserId = (req, res) => {
   const userId = req.query.user_id || req.params.user_id;
   if (!userId) return res.status(400).json({ error: 'user_id is required' });
 
   const sql = `
-    SELECT u.id, u.email, c.customer_id, c.title, c.last_name, c.first_name, c.address, c.city, c.zipcode, c.phone
+    SELECT u.id, u.email, c.customer_id, c.title, c.last_name, c.first_name, c.address, c.city, c.zipcode, c.phone, c.image_path
     FROM users u
     LEFT JOIN customer c ON u.id = c.user_id
     WHERE u.id = ?
@@ -194,4 +222,36 @@ const deleteUserAndCustomer = (req, res) => {
   });
 };
 
-module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByEmail, getCustomerByUserId, deleteUserAndCustomer };
+const getAllUsersWithCustomers = (req, res) => {
+  // Only allow if ?all=true and admin
+  if (!req.query.all || req.query.all !== 'true') {
+    return res.status(400).json({ error: 'Missing or invalid all=true query param' });
+  }
+  const sql = `
+    SELECT 
+      u.id as user_id, u.email, u.status, u.role, u.deleted_at,
+      c.customer_id, c.last_name, c.first_name, c.title, c.address, c.city, c.zipcode, c.phone, c.image_path
+    FROM users u
+    LEFT JOIN customer c ON u.id = c.user_id
+    ORDER BY u.id DESC
+  `;
+  connection.execute(sql, [], (err, results) => {
+    if (err) return res.status(500).json({ error: 'Error fetching users', details: err });
+    res.status(200).json({ success: true, users: results });
+  });
+};
+
+const updateUserStatusRole = (req, res) => {
+  const { status, role } = req.body;
+  const userId = req.params.userId;
+  if (!status || !role) {
+    return res.status(400).json({ error: 'Status and role are required.' });
+  }
+  const sql = `UPDATE users SET status = ?, role = ? WHERE id = ?`;
+  connection.execute(sql, [status, role, userId], (err, result) => {
+    if (err) return res.status(500).json({ error: 'Error updating user', details: err });
+    res.status(200).json({ success: true, message: 'User status and role updated.' });
+  });
+};
+
+module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByUserId, deleteUserAndCustomer, getAllUsersWithCustomers, updateUserStatusRole };
