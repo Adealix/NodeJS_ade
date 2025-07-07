@@ -254,4 +254,19 @@ const updateUserStatusRole = (req, res) => {
   });
 };
 
-module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByUserId, deleteUserAndCustomer, getAllUsersWithCustomers, updateUserStatusRole };
+const logoutUser = (req, res) => {
+  // Use authenticated user id from JWT (set by isAuthenticatedUser middleware)
+  const userId = req.user && req.user.id;
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID not found in token.' });
+  }
+  const sql = 'UPDATE users SET api_token = NULL WHERE id = ?';
+  connection.execute(sql, [userId], (err, result) => {
+    if (err) {
+      return res.status(500).json({ error: 'Error logging out', details: err });
+    }
+    return res.status(200).json({ success: true, message: 'Logged out successfully.' });
+  });
+};
+
+module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByUserId, deleteUserAndCustomer, getAllUsersWithCustomers, updateUserStatusRole, logoutUser };

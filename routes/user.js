@@ -12,7 +12,8 @@ const { registerUser,
     getCustomerByUserId, 
     deleteUserAndCustomer, 
     getAllUsersWithCustomers,
-    updateUserStatusRole } = require('../controllers/user')
+    updateUserStatusRole,
+    logoutUser } = require('../controllers/user')
 
 router.post('/register', registerUser)
 router.post('/login', loginUser)
@@ -25,8 +26,9 @@ router.delete('/delete-user/:user_id', isAuthenticatedUser, isAdmin, deleteUserA
 router.get('/customers', isAuthenticatedUser, isAdmin, getAllUsersWithCustomers);
 // Admin-only: update status and role for a user
 router.put('/customers/:userId/status-role', isAuthenticatedUser, isAdmin, updateUserStatusRole);
-// Customer info endpoints (could be user or admin)
-// router.get('/customer-by-email', isAuthenticatedUser, getCustomerByEmail);
+// If you want to support methodOverride via POST:
+router.post('/customers/:userId/status-role', isAuthenticatedUser, isAdmin, updateUserStatusRole);
 router.get('/customer-by-userid/:user_id', isAuthenticatedUser, getCustomerByUserId);
+router.post('/logout', isAuthenticatedUser, logoutUser);
 module.exports = router
 

@@ -177,3 +177,58 @@ exports.getUserOrdersWithItems = (req, res) => {
     });
 };
 
+// Admin: Get all orders with customer info
+exports.getAllOrders = (req, res) => {
+    const sql = `
+        SELECT o.order_id, o.date_ordered, o.date_delivery, o.status, o.updated_at,
+               c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone, u.email
+        FROM orders o
+        INNER JOIN customer c ON o.customer_id = c.customer_id
+        INNER JOIN users u ON c.user_id = u.id
+        ORDER BY o.date_ordered DESC, o.order_id DESC
+    `;
+    connection.query(sql, (err, rows) => {
+        if (err) return res.status(500).json({ error: 'Error fetching orders', details: err });
+        res.status(200).json({ success: true, orders: rows });
+    });
+};
+
+// Admin: Update order status
+exports.updateOrderStatus = (req, res) => {
+    const orderId = req.params.orderId;
+    const { status } = req.body;
+    if (!['processing', 'delivered', 'canceled'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status value.' });
+    }
+    let sql, params;
+    if (status === 'delivered') {
+        // Set date_delivery to today if delivered
+        sql = `UPDATE orders SET status = ?, updated_at = NOW(), date_delivery = CURDATE() WHERE order_id = ?`;
+        params = [status, orderId];
+    } else {
+        // If not delivered, clear date_delivery
+        sql = `UPDATE orders SET status = ?, updated_at = NOW(), date_delivery = NULL WHERE order_id = ?`;
+        params = [status, orderId];
+    }
+    connection.execute(sql, params, (err, result) => {
+        if (err) return res.status(500).json({ error: 'Error updating order status', details: err });
+        res.status(200).json({ success: true, message: 'Order status updated.' });
+    });
+};
+
+// Admin: Delete order and its orderlines
+exports.deleteOrder = (req, res) => {
+    const orderId = req.params.orderId;
+    // Delete orderlines first due to FK constraint
+    const deleteOrderlinesSql = 'DELETE FROM orderline WHERE order_id = ?';
+    connection.execute(deleteOrderlinesSql, [orderId], (err) => {
+        if (err) return res.status(500).json({ error: 'Error deleting orderlines', details: err });
+        // Delete order
+        const deleteOrderSql = 'DELETE FROM orders WHERE order_id = ?';
+        connection.execute(deleteOrderSql, [orderId], (err2) => {
+            if (err2) return res.status(500).json({ error: 'Error deleting order', details: err2 });
+            res.status(200).json({ success: true, message: 'Order and orderlines deleted.' });
+        });
+    });
+};
+
