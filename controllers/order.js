@@ -1,9 +1,13 @@
 const connection = require('../config/database');
-// const sendEmail = require('../utils/sendEmail')
+const sendEmail = require('../utils/sendEmail');
+const getOrderReceiptHtml = require('../utils/getOrderReceiptHtml');
+const generatePdfFromHtml = require('../utils/generatePdfFromHtml');
 
 exports.createOrder = (req, res, next) => {
     const { cart, user } = req.body;
+    console.log('createOrder called. user:', user, 'cart:', cart);
     if (!user || !user.id || !Array.isArray(cart) || cart.length === 0) {
+        console.log('Missing user or cart is empty:', req.body);
         return res.status(400).json({ error: 'Missing user or cart is empty.' });
     }
 
@@ -13,7 +17,7 @@ exports.createOrder = (req, res, next) => {
 
     connection.beginTransaction(err => {
         if (err) {
-            console.log(err);
+            console.log('Transaction error:', err);
             return res.status(500).json({ error: 'Transaction error', details: err });
         }
 
@@ -21,6 +25,7 @@ exports.createOrder = (req, res, next) => {
         const sql = 'SELECT customer_id, email FROM customer c INNER JOIN users u ON u.id = c.user_id WHERE u.id = ?';
         connection.execute(sql, [parseInt(user.id)], (err, results) => {
             if (err || results.length === 0) {
+                console.log('Customer not found or SQL error:', err, results);
                 return connection.rollback(() => {
                     if (!res.headersSent) {
                         res.status(500).json({ error: 'Customer not found', details: err });
@@ -34,6 +39,7 @@ exports.createOrder = (req, res, next) => {
             const orderSql = 'INSERT INTO orders (customer_id, date_ordered, status) VALUES (?, ?, ?)';
             connection.execute(orderSql, [customer_id, dateOrdered, 'processing'], (err, result) => {
                 if (err) {
+                    console.log('Error inserting order:', err);
                     return connection.rollback(() => {
                         if (!res.headersSent) {
                             res.status(500).json({ error: 'Error inserting order', details: err });
@@ -55,6 +61,7 @@ exports.createOrder = (req, res, next) => {
                     // Validate item_id and quantity
                     if (typeof item.item_id === 'undefined' || typeof item.quantity === 'undefined') {
                         errorOccurred = true;
+                        console.log('Cart item missing item_id or quantity:', item);
                         return connection.rollback(() => {
                             if (!res.headersSent) {
                                 res.status(400).json({ error: 'Cart item missing item_id or quantity', item });
@@ -65,6 +72,7 @@ exports.createOrder = (req, res, next) => {
                     connection.execute(orderLineSql, [order_id, item.item_id, item.quantity], (err) => {
                         if (err && !errorOccurred) {
                             errorOccurred = true;
+                            console.log('Error inserting orderline:', err);
                             return connection.rollback(() => {
                                 if (!res.headersSent) {
                                     res.status(500).json({ error: 'Error inserting orderline', details: err });
@@ -76,6 +84,7 @@ exports.createOrder = (req, res, next) => {
                     connection.execute(stockSql, [item.quantity, item.item_id, item.quantity], (err, stockResult) => {
                         if ((err || stockResult.affectedRows === 0) && !errorOccurred) {
                             errorOccurred = true;
+                            console.log('Stock error: insufficient stock or update failed:', err, stockResult);
                             return connection.rollback(() => {
                                 if (!res.headersSent) {
                                     res.status(500).json({ error: 'Stock error: insufficient stock or update failed', details: err });
@@ -86,6 +95,7 @@ exports.createOrder = (req, res, next) => {
                         if (completed === cart.length && !errorOccurred) {
                             connection.commit(err => {
                                 if (err) {
+                                    console.log('Commit error:', err);
                                     return connection.rollback(() => {
                                         if (!res.headersSent) {
                                             res.status(500).json({ error: 'Commit error', details: err });
@@ -202,17 +212,56 @@ exports.updateOrderStatus = (req, res) => {
     }
     let sql, params;
     if (status === 'delivered') {
-        // Set date_delivery to today if delivered
         sql = `UPDATE orders SET status = ?, updated_at = NOW(), date_delivery = CURDATE() WHERE order_id = ?`;
         params = [status, orderId];
     } else {
-        // If not delivered, clear date_delivery
         sql = `UPDATE orders SET status = ?, updated_at = NOW(), date_delivery = NULL WHERE order_id = ?`;
         params = [status, orderId];
     }
-    connection.execute(sql, params, (err, result) => {
-        if (err) return res.status(500).json({ error: 'Error updating order status', details: err });
-        res.status(200).json({ success: true, message: 'Order status updated.' });
+    connection.execute(sql, params, async (err, result) => {
+        if (err) {
+            console.error('Error updating order status:', err);
+            return res.status(500).json({ error: 'Error updating order status', details: err });
+        }
+        // Fetch customer email for this order
+        const emailSql = `
+            SELECT u.email
+            FROM orders o
+            INNER JOIN customer c ON o.customer_id = c.customer_id
+            INNER JOIN users u ON c.user_id = u.id
+            WHERE o.order_id = ?
+        `;
+        connection.execute(emailSql, [orderId], async (emailErr, emailRows) => {
+            if (emailErr) {
+                console.error('Error fetching customer email:', emailErr);
+                return res.status(500).json({ error: 'Error fetching customer email', details: emailErr });
+            }
+            if (emailRows.length > 0) {
+                try {
+                    // Generate HTML and PDF
+                    const html = await getOrderReceiptHtml(orderId);
+                    const pdfBuffer = await generatePdfFromHtml(html);
+                    await sendEmail({
+                        email: emailRows[0].email,
+                        subject: 'Order Status Updated',
+                        message: `Your order #${orderId} status has been updated to: ${status}. Please see attached receipt.`,
+                        attachments: [{
+                            filename: `OrderReceipt_${orderId}.pdf`,
+                            content: pdfBuffer,
+                            contentType: 'application/pdf'
+                        }]
+                    });
+                    // Log success
+                    console.log(`Email with PDF sent to ${emailRows[0].email} for order #${orderId}`);
+                } catch (sendErr) {
+                    // Log error but still respond success for order status update
+                    console.error('Error sending email with PDF:', sendErr);
+                    return res.status(200).json({ success: true, message: 'Order status updated, but failed to send email receipt.', emailError: sendErr.toString() });
+                }
+            }
+            // Always respond to frontend
+            res.status(200).json({ success: true, message: 'Order status updated.' });
+        });
     });
 };
 
@@ -230,5 +279,33 @@ exports.deleteOrder = (req, res) => {
             res.status(200).json({ success: true, message: 'Order and orderlines deleted.' });
         });
     });
+};
+
+// Endpoint: GET /orders/:orderId/receipt-html (returns HTML for receipt)
+exports.getOrderReceiptHtmlEndpoint = async (req, res) => {
+    const orderId = req.params.orderId;
+    try {
+        const html = await getOrderReceiptHtml(orderId);
+        res.set('Content-Type', 'text/html');
+        res.send(html);
+    } catch (err) {
+        res.status(404).send('Receipt not found');
+    }
+};
+
+// Endpoint: GET /orders/:orderId/receipt-pdf (returns PDF for receipt)
+exports.getOrderReceiptPdfEndpoint = async (req, res) => {
+    const orderId = req.params.orderId;
+    try {
+        const html = await getOrderReceiptHtml(orderId);
+        const pdfBuffer = await generatePdfFromHtml(html);
+        res.set({
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': `attachment; filename=OrderReceipt_${orderId}.pdf`
+        });
+        res.send(pdfBuffer);
+    } catch (err) {
+        res.status(404).send('Receipt not found');
+    }
 };
 

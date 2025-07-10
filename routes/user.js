@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const upload = require('../utils/multer')
+const sendEmail = require('../utils/sendEmail');
 
 const { isAuthenticatedUser, isAdmin } = require('../middlewares/auth');
 
@@ -30,5 +31,19 @@ router.put('/customers/:userId/status-role', isAuthenticatedUser, isAdmin, updat
 router.post('/customers/:userId/status-role', isAuthenticatedUser, isAdmin, updateUserStatusRole);
 router.get('/customer-by-userid/:user_id', isAuthenticatedUser, getCustomerByUserId);
 router.post('/logout', isAuthenticatedUser, logoutUser);
+
+router.post('/test-email', async (req, res) => {
+  try {
+    await sendEmail({
+      email: req.body.email, // or hardcode for testing
+      subject: req.body.subject || 'Test Email',
+      message: req.body.message || 'This is a test email from your Node.js app.'
+    });
+    res.status(200).json({ success: true, message: 'Test email sent!' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router
 
