@@ -1,7 +1,25 @@
+const getOrderReceiptHtml = require('../utils/getOrderReceiptHtml');
+// Endpoint: GET /orders/:orderId/receipt-html (returns HTML for receipt, user must own order)
+exports.getOrderReceiptHtmlEndpoint = async (req, res) => {
+    const orderId = req.params.orderId;
+    const userId = req.user && req.user.id;
+    if (!userId) return res.status(401).send('Unauthorized');
+    // Check that the order belongs to the logged-in user
+    const sql = `SELECT o.order_id FROM orders o INNER JOIN customer c ON o.customer_id = c.customer_id WHERE o.order_id = ? AND c.user_id = ?`;
+    connection.execute(sql, [orderId, userId], async (err, rows) => {
+        if (err || !rows.length) return res.status(403).send('Forbidden: You do not have access to this order.');
+        try {
+            const html = await getOrderReceiptHtml(orderId);
+            res.set('Content-Type', 'text/html');
+            res.send(html);
+        } catch (e) {
+            res.status(404).send('Receipt not found');
+        }
+    });
+};
 const connection = require('../config/database');
 const sendEmail = require('../utils/sendEmail');
-const getOrderReceiptHtml = require('../utils/getOrderReceiptHtml');
-const generatePdfFromHtml = require('../utils/generatePdfFromHtml');
+const { generateOrderReceiptPdfKit, generateOrderReceiptPdfKitLightweight } = require('../utils/order_receipt');
 
 exports.createOrder = (req, res, next) => {
     const { cart, user } = req.body;
@@ -14,6 +32,7 @@ exports.createOrder = (req, res, next) => {
     const dateOrdered = new Date();
     // No dateShipped at order creation, set to NULL
     const dateShipped = null;
+    const shippingFee = 50.00; // Default, but now stored in DB
 
     connection.beginTransaction(err => {
         if (err) {
@@ -35,9 +54,9 @@ exports.createOrder = (req, res, next) => {
 
             const { customer_id, email } = results[0];
 
-            // Insert into orders table
-            const orderSql = 'INSERT INTO orders (customer_id, date_ordered, status) VALUES (?, ?, ?)';
-            connection.execute(orderSql, [customer_id, dateOrdered, 'processing'], (err, result) => {
+            // Insert into orders table (now with shipping_fee)
+            const orderSql = 'INSERT INTO orders (customer_id, date_ordered, status, shipping_fee) VALUES (?, ?, ?, ?)';
+            connection.execute(orderSql, [customer_id, dateOrdered, 'processing', shippingFee], (err, result) => {
                 if (err) {
                     console.log('Error inserting order:', err);
                     return connection.rollback(() => {
@@ -103,14 +122,14 @@ exports.createOrder = (req, res, next) => {
                                     });
                                 }
                                 if (!res.headersSent) {
-                                    res.status(201).json({
-                                        success: true,
-                                        order_id,
-                                        dateOrdered,
-                                        message: 'Order placed successfully!',
-                                        cart,
-                                        shipping: 50.00 // <-- add this
-                                    });
+                                res.status(201).json({
+                                    success: true,
+                                    order_id,
+                                    dateOrdered,
+                                    message: 'Order placed successfully!',
+                                    cart,
+                                    shipping: shippingFee
+                                });
                                 }
                             });
                         }
@@ -158,7 +177,7 @@ exports.getUserOrdersWithItems = (req, res) => {
                     address: row.address,
                     city: row.city,
                     phone: row.phone,
-                    shipping: 50.00, // Add shipping fee here
+                    shipping: row.shipping_fee !== undefined ? Number(row.shipping_fee) : 50.00,
                     items: {},
                 };
             }
@@ -218,51 +237,147 @@ exports.updateOrderStatus = (req, res) => {
         sql = `UPDATE orders SET status = ?, updated_at = NOW(), date_delivery = NULL WHERE order_id = ?`;
         params = [status, orderId];
     }
-    connection.execute(sql, params, async (err, result) => {
-        if (err) {
-            console.error('Error updating order status:', err);
-            return res.status(500).json({ error: 'Error updating order status', details: err });
-        }
-        // Fetch customer email for this order
-        const emailSql = `
-            SELECT u.email
+
+    // Helper to wrap connection.execute in a Promise
+    function executeAsync(sql, params) {
+        return new Promise((resolve, reject) => {
+            connection.execute(sql, params, (err, result) => {
+                if (err) reject(err);
+                else resolve(result);
+            });
+        });
+    }
+
+    // Helper to fetch order and items for PDF/email
+    async function fetchOrderWithItems(orderId) {
+        const orderSql = `
+            SELECT o.order_id, o.date_ordered, o.status, o.shipping_fee,
+                c.last_name, c.first_name, c.address, c.city, c.phone, u.email
             FROM orders o
             INNER JOIN customer c ON o.customer_id = c.customer_id
             INNER JOIN users u ON c.user_id = u.id
             WHERE o.order_id = ?
         `;
-        connection.execute(emailSql, [orderId], async (emailErr, emailRows) => {
-            if (emailErr) {
-                console.error('Error fetching customer email:', emailErr);
-                return res.status(500).json({ error: 'Error fetching customer email', details: emailErr });
+        const [orderRows] = await new Promise((resolve, reject) => {
+            connection.execute(orderSql, [orderId], (err, rows) => {
+                if (err) reject(err);
+                else resolve([rows]);
+            });
+        });
+        if (!orderRows.length) throw new Error('Order not found');
+        const order = orderRows[0];
+        const itemsSql = `
+            SELECT oi.item_id, oi.quantity, i.name, i.sell_price, img.image_path
+            FROM orderline oi
+            INNER JOIN items i ON oi.item_id = i.item_id
+            LEFT JOIN items_images img ON i.item_id = img.item_id
+            WHERE oi.order_id = ?
+            ORDER BY oi.item_id
+        `;
+        const [itemRows] = await new Promise((resolve, reject) => {
+            connection.execute(itemsSql, [orderId], (err, rows) => {
+                if (err) reject(err);
+                else resolve([rows]);
+            });
+        });
+        const itemsMap = {};
+        itemRows.forEach(row => {
+            if (!itemsMap[row.item_id]) {
+                itemsMap[row.item_id] = {
+                    item_id: row.item_id,
+                    name: row.name,
+                    quantity: row.quantity,
+                    sell_price: row.sell_price,
+                    images: [],
+                };
             }
-            if (emailRows.length > 0) {
-                try {
-                    // Generate HTML and PDF
-                    const html = await getOrderReceiptHtml(orderId);
-                    const pdfBuffer = await generatePdfFromHtml(html);
-                    await sendEmail({
-                        email: emailRows[0].email,
-                        subject: 'Order Status Updated',
-                        message: `Your order #${orderId} status has been updated to: ${status}. Please see attached receipt.`,
-                        attachments: [{
-                            filename: `OrderReceipt_${orderId}.pdf`,
-                            content: pdfBuffer,
-                            contentType: 'application/pdf'
-                        }]
-                    });
-                    // Log success
-                    console.log(`Email with PDF sent to ${emailRows[0].email} for order #${orderId}`);
-                } catch (sendErr) {
-                    // Log error but still respond success for order status update
-                    console.error('Error sending email with PDF:', sendErr);
-                    return res.status(200).json({ success: true, message: 'Order status updated, but failed to send email receipt.', emailError: sendErr.toString() });
+            if (row.image_path && !itemsMap[row.item_id].images.includes(row.image_path)) {
+                itemsMap[row.item_id].images.push(row.image_path);
+            }
+        });
+        order.items = Object.values(itemsMap);
+        return order;
+    }
+
+    // Main logic with timeout
+    (async () => {
+        let timeoutHandle;
+        let responded = false;
+        // Set up a 10s timeout
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutHandle = setTimeout(() => {
+                if (!responded) {
+                    responded = true;
+                    reject(new Error('Timeout: Operation took longer than 10 seconds.'));
+                }
+            }, 10000);
+        });
+
+        // Main update and email logic
+        const mainPromise = (async () => {
+            try {
+                // 1. Update order status in DB
+                await executeAsync(sql, params);
+                // 2. Fetch order and items
+                const order = await fetchOrderWithItems(orderId);
+                // 3. Generate PDF (try full version first, then lightweight for email)
+                let pdfBuffer = await generateOrderReceiptPdfKit(order);
+                console.log(`Full PDF size: ${(pdfBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+                // 4. Send email
+                const maxAttachmentSize = 5 * 1024 * 1024; // 5MB (reduced from 20MB for better email compatibility)
+                let attachments = [];
+                if (pdfBuffer.length < maxAttachmentSize) {
+                    attachments = [{
+                        filename: `OrderReceipt_${orderId}.pdf`,
+                        content: pdfBuffer,
+                        contentType: 'application/pdf'
+                    }];
+                } else {
+                    // Try lightweight version for email
+                    try {
+                        const lightweightPdfBuffer = await generateOrderReceiptPdfKitLightweight(order);
+                        console.log(`Lightweight PDF size: ${(lightweightPdfBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+                        if (lightweightPdfBuffer.length < maxAttachmentSize) {
+                            attachments = [{
+                                filename: `OrderReceipt_${orderId}.pdf`,
+                                content: lightweightPdfBuffer,
+                                contentType: 'application/pdf'
+                            }];
+                        }
+                    } catch (e) {
+                        console.log('Lightweight PDF generation failed:', e.message);
+                    }
+                }
+                await sendEmail({
+                    email: order.email,
+                    subject: 'Order Status Updated',
+                    message: `Your order #${orderId} status has been updated to: ${status}.` + (attachments.length ? ' Please see attached receipt.' : ' (Receipt PDF was too large to send by email.)'),
+                    attachments
+                });
+                if (!responded) {
+                    responded = true;
+                    clearTimeout(timeoutHandle);
+                    res.status(200).json({ success: true, message: 'Order status updated and email sent successfully.' });
+                }
+            } catch (err) {
+                if (!responded) {
+                    responded = true;
+                    clearTimeout(timeoutHandle);
+                    res.status(500).json({ error: err.message || 'Error updating order or sending email.' });
                 }
             }
-            // Always respond to frontend
-            res.status(200).json({ success: true, message: 'Order status updated.' });
-        });
-    });
+        })();
+
+        // Race main logic and timeout
+        try {
+            await Promise.race([mainPromise, timeoutPromise]);
+        } catch (err) {
+            if (!responded) {
+                responded = true;
+                res.status(500).json({ error: err.message || 'Timeout or unknown error.' });
+            }
+        }
+    })();
 };
 
 // Admin: Delete order and its orderlines
@@ -281,29 +396,64 @@ exports.deleteOrder = (req, res) => {
     });
 };
 
-// Endpoint: GET /orders/:orderId/receipt-html (returns HTML for receipt)
-exports.getOrderReceiptHtmlEndpoint = async (req, res) => {
-    const orderId = req.params.orderId;
-    try {
-        const html = await getOrderReceiptHtml(orderId);
-        res.set('Content-Type', 'text/html');
-        res.send(html);
-    } catch (err) {
-        res.status(404).send('Receipt not found');
-    }
-};
-
-// Endpoint: GET /orders/:orderId/receipt-pdf (returns PDF for receipt)
+// Endpoint: GET /orders/:orderId/receipt-pdf (returns PDF for receipt using PDFKit)
 exports.getOrderReceiptPdfEndpoint = async (req, res) => {
     const orderId = req.params.orderId;
     try {
-        const html = await getOrderReceiptHtml(orderId);
-        const pdfBuffer = await generatePdfFromHtml(html);
-        res.set({
-            'Content-Type': 'application/pdf',
-            'Content-Disposition': `attachment; filename=OrderReceipt_${orderId}.pdf`
+        // Fetch order and items (same as in email logic)
+        const orderSql = `
+            SELECT o.order_id, o.date_ordered, o.status, o.shipping_fee,
+                c.last_name, c.first_name, c.address, c.city, c.phone, u.email
+            FROM orders o
+            INNER JOIN customer c ON o.customer_id = c.customer_id
+            INNER JOIN users u ON c.user_id = u.id
+            WHERE o.order_id = ?
+        `;
+        connection.execute(orderSql, [orderId], async (orderErr, orderRows) => {
+            if (orderErr || !orderRows.length) {
+                return res.status(404).send('Receipt not found');
+            }
+            const order = orderRows[0];
+            const itemsSql = `
+                SELECT oi.item_id, oi.quantity, i.name, i.sell_price, img.image_path
+                FROM orderline oi
+                INNER JOIN items i ON oi.item_id = i.item_id
+                LEFT JOIN items_images img ON i.item_id = img.item_id
+                WHERE oi.order_id = ?
+                ORDER BY oi.item_id
+            `;
+            connection.execute(itemsSql, [orderId], async (itemsErr, itemRows) => {
+                if (itemsErr) {
+                    return res.status(404).send('Receipt not found');
+                }
+                const itemsMap = {};
+                itemRows.forEach(row => {
+                    if (!itemsMap[row.item_id]) {
+                        itemsMap[row.item_id] = {
+                            item_id: row.item_id,
+                            name: row.name,
+                            quantity: row.quantity,
+                            sell_price: row.sell_price,
+                            images: [],
+                        };
+                    }
+                    if (row.image_path && !itemsMap[row.item_id].images.includes(row.image_path)) {
+                        itemsMap[row.item_id].images.push(row.image_path);
+                    }
+                });
+                order.items = Object.values(itemsMap);
+                try {
+                    const pdfBuffer = await generateOrderReceiptPdfKit(order);
+                    res.set({
+                        'Content-Type': 'application/pdf',
+                        'Content-Disposition': `attachment; filename=OrderReceipt_${orderId}.pdf`
+                    });
+                    res.send(pdfBuffer);
+                } catch (err) {
+                    res.status(404).send('Receipt not found');
+                }
+            });
         });
-        res.send(pdfBuffer);
     } catch (err) {
         res.status(404).send('Receipt not found');
     }

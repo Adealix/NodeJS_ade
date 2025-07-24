@@ -257,15 +257,28 @@ const updateUserStatusRole = (req, res) => {
 const logoutUser = (req, res) => {
   // Use authenticated user id from JWT (set by isAuthenticatedUser middleware)
   const userId = req.user && req.user.id;
+  console.log('Logout attempt for user ID:', userId); // Debug log
+  
   if (!userId) {
+    console.log('No user ID found in token'); // Debug log
     return res.status(400).json({ error: 'User ID not found in token.' });
   }
+  
   const sql = 'UPDATE users SET api_token = NULL WHERE id = ?';
   connection.execute(sql, [userId], (err, result) => {
     if (err) {
+      console.log('Database error during logout:', err); // Debug log
       return res.status(500).json({ error: 'Error logging out', details: err });
     }
-    return res.status(200).json({ success: true, message: 'Logged out successfully.' });
+    
+    console.log('Logout database result:', result); // Debug log
+    console.log('Affected rows:', result.affectedRows); // Debug log
+    
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Logged out successfully.',
+      affectedRows: result.affectedRows 
+    });
   });
 };
 
