@@ -1,6 +1,8 @@
 const connection = require('../config/database');
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
+const crypto = require('crypto')
+const sendEmail = require('../utils/sendEmail')
 
 const registerUser = async (req, res) => {
   // Expecting: { "last_name": "...", "first_name": "...", "email": "...", "password": "..." }
@@ -8,24 +10,123 @@ const registerUser = async (req, res) => {
   if (!last_name || !first_name || !email || !password) {
     return res.status(400).json({ error: 'All fields are required.' });
   }
+  
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    // Insert into users table (status and role default to 'active' and 'user')
-    const userSql = `INSERT INTO users (email, password) VALUES (?, ?)`;
-    connection.execute(userSql, [email, hashedPassword], (err, userResult) => {
+    // Check if email already exists
+    const checkEmailSql = 'SELECT id FROM users WHERE email = ?';
+    connection.execute(checkEmailSql, [email], async (err, existingUsers) => {
       if (err) {
         console.log(err);
-        return res.status(500).json({ error: 'Error creating user', details: err });
+        return res.status(500).json({ error: 'Error checking email', details: err });
       }
-      const userId = userResult.insertId;
-      // Insert into customer table (other fields left as NULL)
-      const customerSql = `INSERT INTO customer (last_name, first_name, user_id) VALUES (?, ?, ?)`;
-      connection.execute(customerSql, [last_name, first_name, userId], (err2, customerResult) => {
-        if (err2) {
-          console.log(err2);
-          return res.status(500).json({ error: 'Error creating customer', details: err2 });
+      
+      if (existingUsers.length > 0) {
+        return res.status(400).json({ error: 'Email already registered' });
+      }
+      
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      // Generate email verification token
+      const emailVerificationToken = crypto.randomBytes(32).toString('hex');
+      
+      // Insert into users table with email verification token
+      const userSql = `INSERT INTO users (email, password, remember_token) VALUES (?, ?, ?)`;
+      connection.execute(userSql, [email, hashedPassword, emailVerificationToken], (err, userResult) => {
+        if (err) {
+          console.log(err);
+          return res.status(500).json({ error: 'Error creating user', details: err });
         }
-        return res.status(201).json({ success: true, user_id: userId, customer_id: customerResult.insertId });
+        
+        const userId = userResult.insertId;
+        
+        // Insert into customer table (other fields left as NULL)
+        const customerSql = `INSERT INTO customer (last_name, first_name, user_id) VALUES (?, ?, ?)`;
+        connection.execute(customerSql, [last_name, first_name, userId], async (err2, customerResult) => {
+          if (err2) {
+            console.log(err2);
+            return res.status(500).json({ error: 'Error creating customer', details: err2 });
+          }
+          
+          // Send verification email
+          try {
+            const verificationUrl = `http://localhost/jquery_ade/verify-email.html?token=${emailVerificationToken}`;
+            
+            const emailHtml = `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Verify Your Email - GadgetEssence</title>
+                <style>
+                  body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                  .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                  .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+                  .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px; }
+                  .verify-btn { display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 25px; font-weight: bold; margin: 20px 0; }
+                  .verify-btn:hover { opacity: 0.9; }
+                  .footer { text-align: center; margin-top: 20px; color: #666; font-size: 14px; }
+                </style>
+              </head>
+              <body>
+                <div class="container">
+                  <div class="header">
+                    <h1>🎉 Welcome to GadgetEssence!</h1>
+                    <p>Your account has been created successfully</p>
+                  </div>
+                  <div class="content">
+                    <h2>Hello ${first_name} ${last_name}!</h2>
+                    <p>Thank you for registering with GadgetEssence. To complete your account setup and start shopping for amazing gadgets, please verify your email address.</p>
+                    <p><strong>Why verify your email?</strong></p>
+                    <ul>
+                      <li>✅ Secure your account</li>
+                      <li>✅ Receive important order updates</li>
+                      <li>✅ Access all website features</li>
+                      <li>✅ Get exclusive offers and promotions</li>
+                    </ul>
+                    <div style="text-align: center;">
+                      <a href="${verificationUrl}" class="verify-btn">Verify Email Address</a>
+                    </div>
+                    <p style="margin-top: 20px;"><strong>Note:</strong> This verification link will expire in 24 hours for security reasons.</p>
+                    <p>If you didn't create an account with us, please ignore this email.</p>
+                  </div>
+                  <div class="footer">
+                    <p>© 2025 GadgetEssence. All rights reserved.</p>
+                    <p>If you're having trouble clicking the button, copy and paste this URL into your browser:</p>
+                    <p style="word-break: break-all; color: #667eea;">${verificationUrl}</p>
+                  </div>
+                </div>
+              </body>
+              </html>
+            `;
+            
+            await sendEmail({
+              email: email,
+              subject: 'Verify Your Email Address - GadgetEssence',
+              message: emailHtml
+            });
+            
+            return res.status(201).json({ 
+              success: true, 
+              message: 'Registration successful! Please check your email and click the verification link to activate your account.',
+              user_id: userId, 
+              customer_id: customerResult.insertId,
+              email_sent: true
+            });
+            
+          } catch (emailError) {
+            console.log('Email sending failed:', emailError);
+            // Still return success but note that email failed
+            return res.status(201).json({ 
+              success: true, 
+              message: 'Registration successful! However, there was an issue sending the verification email. Please contact support.',
+              user_id: userId, 
+              customer_id: customerResult.insertId,
+              email_sent: false,
+              email_error: emailError.message
+            });
+          }
+        });
       });
     });
   } catch (error) {
@@ -36,8 +137,8 @@ const registerUser = async (req, res) => {
 
 const loginUser = (req, res) => {
   const { email, password } = req.body;
-  // Select role from users table
-  const sql = `SELECT u.id, u.email, u.password, u.role, u.status, c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone
+  // Select role from users table and check email verification
+  const sql = `SELECT u.id, u.email, u.password, u.role, u.status, u.email_verified_at, c.customer_id, c.last_name, c.first_name, c.address, c.city, c.phone
                FROM users u
                LEFT JOIN customer c ON u.id = c.user_id
                WHERE u.email = ?`;
@@ -55,6 +156,15 @@ const loginUser = (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    // Check if email is verified
+    if (!user.email_verified_at) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Please verify your email address before logging in. Check your email for the verification link.',
+        email_not_verified: true 
+      });
     }
 
     // Check if the account is active
@@ -81,6 +191,226 @@ const loginUser = (req, res) => {
       });
     });
   });
+};
+
+// Email verification function
+const verifyEmail = async (req, res) => {
+  const { token } = req.query;
+  
+  if (!token) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Verification token is required' 
+    });
+  }
+  
+  try {
+    // Find user with the verification token
+    const findUserSql = `
+      SELECT u.id, u.email, u.email_verified_at, c.first_name, c.last_name 
+      FROM users u 
+      LEFT JOIN customer c ON u.id = c.user_id 
+      WHERE u.remember_token = ? AND u.email_verified_at IS NULL
+    `;
+    
+    connection.execute(findUserSql, [token], (err, results) => {
+      if (err) {
+        console.log(err);
+        return res.status(500).json({ 
+          success: false, 
+          message: 'Error verifying email', 
+          details: err 
+        });
+      }
+      
+      if (results.length === 0) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Invalid or expired verification token. The link may have already been used or expired.' 
+        });
+      }
+      
+      const user = results[0];
+      
+      // Update user as verified
+      const updateUserSql = `
+        UPDATE users 
+        SET email_verified_at = NOW(), remember_token = NULL 
+        WHERE id = ?
+      `;
+      
+      connection.execute(updateUserSql, [user.id], (err2, updateResult) => {
+        if (err2) {
+          console.log(err2);
+          return res.status(500).json({ 
+            success: false, 
+            message: 'Error updating verification status', 
+            details: err2 
+          });
+        }
+        
+        return res.status(200).json({ 
+          success: true, 
+          message: `Email verified successfully! Welcome ${user.first_name || ''} ${user.last_name || ''}. You can now log in to your account.`,
+          user: {
+            id: user.id,
+            email: user.email,
+            first_name: user.first_name,
+            last_name: user.last_name
+          }
+        });
+      });
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Server error during email verification', 
+      details: error 
+    });
+  }
+};
+
+// Resend verification email function
+const resendVerificationEmail = async (req, res) => {
+  const { email } = req.body;
+  
+  if (!email) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Email is required' 
+    });
+  }
+  
+  try {
+    // Find user by email
+    const findUserSql = `
+      SELECT u.id, u.email, u.email_verified_at, c.first_name, c.last_name 
+      FROM users u 
+      LEFT JOIN customer c ON u.id = c.user_id 
+      WHERE u.email = ?
+    `;
+    
+    connection.execute(findUserSql, [email], async (err, results) => {
+      if (err) {
+        console.log(err);
+        return res.status(500).json({ 
+          success: false, 
+          message: 'Error finding user', 
+          details: err 
+        });
+      }
+      
+      if (results.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          message: 'No account found with this email address' 
+        });
+      }
+      
+      const user = results[0];
+      
+      // Check if already verified
+      if (user.email_verified_at) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Email is already verified. You can log in to your account.' 
+        });
+      }
+      
+      // Generate new verification token
+      const newVerificationToken = crypto.randomBytes(32).toString('hex');
+      
+      // Update user with new token
+      const updateTokenSql = 'UPDATE users SET remember_token = ? WHERE id = ?';
+      connection.execute(updateTokenSql, [newVerificationToken, user.id], async (err2, updateResult) => {
+        if (err2) {
+          console.log(err2);
+          return res.status(500).json({ 
+            success: false, 
+            message: 'Error updating verification token', 
+            details: err2 
+          });
+        }
+        
+        // Send verification email
+        try {
+          const verificationUrl = `http://localhost/jquery_ade/verify-email.html?token=${newVerificationToken}`;
+          
+          const emailHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Verify Your Email - GadgetEssence</title>
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+                .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px; }
+                .verify-btn { display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 25px; font-weight: bold; margin: 20px 0; }
+                .verify-btn:hover { opacity: 0.9; }
+                .footer { text-align: center; margin-top: 20px; color: #666; font-size: 14px; }
+              </style>
+            </head>
+            <body>
+              <div class="container">
+                <div class="header">
+                  <h1>📧 Email Verification</h1>
+                  <p>Complete your account setup</p>
+                </div>
+                <div class="content">
+                  <h2>Hello ${user.first_name || ''} ${user.last_name || ''}!</h2>
+                  <p>You requested a new verification email for your GadgetEssence account.</p>
+                  <p>Please click the button below to verify your email address:</p>
+                  <div style="text-align: center;">
+                    <a href="${verificationUrl}" class="verify-btn">Verify Email Address</a>
+                  </div>
+                  <p style="margin-top: 20px;"><strong>Note:</strong> This verification link will expire in 24 hours for security reasons.</p>
+                  <p>If you didn't request this email, please ignore it.</p>
+                </div>
+                <div class="footer">
+                  <p>© 2025 GadgetEssence. All rights reserved.</p>
+                  <p>If you're having trouble clicking the button, copy and paste this URL into your browser:</p>
+                  <p style="word-break: break-all; color: #667eea;">${verificationUrl}</p>
+                </div>
+              </div>
+            </body>
+            </html>
+          `;
+          
+          await sendEmail({
+            email: email,
+            subject: 'Verify Your Email Address - GadgetEssence',
+            message: emailHtml
+          });
+          
+          return res.status(200).json({ 
+            success: true, 
+            message: 'Verification email sent successfully! Please check your email and click the verification link.',
+            email_sent: true
+          });
+          
+        } catch (emailError) {
+          console.log('Email sending failed:', emailError);
+          return res.status(500).json({ 
+            success: false, 
+            message: 'Error sending verification email. Please try again later.',
+            email_sent: false,
+            email_error: emailError.message
+          });
+        }
+      });
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Server error', 
+      details: error 
+    });
+  }
 };
 
 const updateUser = (req, res) => {
@@ -282,4 +612,4 @@ const logoutUser = (req, res) => {
   });
 };
 
-module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByUserId, deleteUserAndCustomer, getAllUsersWithCustomers, updateUserStatusRole, logoutUser };
+module.exports = { registerUser, loginUser, updateUser, deactivateUser, getCustomerByUserId, deleteUserAndCustomer, getAllUsersWithCustomers, updateUserStatusRole, logoutUser, verifyEmail, resendVerificationEmail };

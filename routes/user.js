@@ -14,10 +14,14 @@ const { registerUser,
     deleteUserAndCustomer, 
     getAllUsersWithCustomers,
     updateUserStatusRole,
-    logoutUser } = require('../controllers/user')
+    logoutUser,
+    verifyEmail,
+    resendVerificationEmail } = require('../controllers/user')
 
 router.post('/register', registerUser)
 router.post('/login', loginUser)
+router.get('/verify-email', verifyEmail)
+router.post('/resend-verification', resendVerificationEmail)
 // Only authenticated users can update their profile
 router.post('/update-profile', isAuthenticatedUser, upload.single('image'), updateUser)
 // Only admin can deactivate users and delete users
